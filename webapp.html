@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Мини‑приложение Telegram</title>
+    <!-- Подключаем официальную библиотеку Telegram для мини‑приложений. Благодаря параметру
+         (например, ?59) браузер всегда скачивает последнюю версию.  -->
+    <script src="https://telegram.org/js/telegram-web-app.js?59"></script>
+    <style>
+        /* Используем css‑переменные, предоставляемые Telegram, чтобы интерфейс
+           автоматически подстраивался под светлую/тёмную тему пользователя. */
+        body {
+            background-color: var(--tg-theme-bg-color);
+            color: var(--tg-theme-text-color);
+            font-family: system-ui, sans-serif;
+            margin: 0;
+            padding: 16px;
+        }
+
+        .wrapper {
+            max-width: 500px;
+            margin: auto;
+            display: flex;
+            flex-direction: column;
+            align-items: stretch;
+            gap: 12px;
+        }
+
+        h1 {
+            font-size: 24px;
+            margin: 0 0 8px 0;
+            text-align: center;
+        }
+
+        p {
+            margin: 0 0 8px 0;
+            font-size: 16px;
+            text-align: center;
+        }
+
+        input[type="text"] {
+            padding: 10px;
+            font-size: 16px;
+            border: 1px solid var(--tg-theme-hint-color);
+            border-radius: 4px;
+            background-color: var(--tg-theme-secondary-bg-color);
+            color: var(--tg-theme-text-color);
+        }
+
+        button {
+            padding: 12px;
+            font-size: 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            background-color: var(--tg-theme-button-color);
+            color: var(--tg-theme-button-text-color);
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: default;
+        }
+    </style>
+</head>
+<body>
+    <div class="wrapper">
+        <h1>Пример мини‑приложения</h1>
+        <p>Введите текст и отправьте его боту:</p>
+        <input type="text" id="userInput" placeholder="Ваш текст…" autocomplete="off">
+        <button id="sendBtn">Отправить</button>
+    </div>
+
+    <script>
+        // Получаем объект Telegram WebApp. Он предоставляет методы для взаимодействия
+        // с клиентом Telegram (например, отправка данных боту и закрытие окна).
+        const tg = window.Telegram.WebApp;
+
+        // Ссылки на элементы DOM
+        const inputEl = document.getElementById('userInput');
+        const sendBtn = document.getElementById('sendBtn');
+
+        // При нажатии на кнопку собираем введённый текст и отправляем его боту
+        sendBtn.addEventListener('click', () => {
+            const text = inputEl.value.trim();
+            if (!text) {
+                // Вызываем лёгкую вибрацию/хаптик для предупреждения пользователя
+                if (tg.HapticFeedback && tg.HapticFeedback.impactOccurred) {
+                    tg.HapticFeedback.impactOccurred('medium');
+                }
+                alert('Пожалуйста, введите текст перед отправкой.');
+                return;
+            }
+            // Отправляем данные боту. Тип данных должен быть строкой.
+            tg.sendData(text);
+            // Закрываем мини‑приложение. Пользователь вернётся в чат.
+            tg.close();
+        });
+
+        // При фокусе в поле ввода разрешаем отправку по клавише Enter
+        inputEl.addEventListener('keypress', (ev) => {
+            if (ev.key === 'Enter') {
+                ev.preventDefault();
+                sendBtn.click();
+            }
+        });
+
+        // После загрузки страницы разворачиваем мини‑приложение на максимальную высоту
+        tg.ready();
+        tg.expand();
+
+    </script>
+</body>
+</html>
