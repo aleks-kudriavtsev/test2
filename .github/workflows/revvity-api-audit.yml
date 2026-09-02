@@ -33,6 +33,7 @@ jobs:
           python revvity_api_audit/probe.py
           python revvity_api_audit/search_probe.py
           python revvity_api_audit/discover_public_codes.py
+          python revvity_api_audit/infrastructure_probe.py
 
       - name: Upload audit results
         uses: actions/upload-artifact@v4
