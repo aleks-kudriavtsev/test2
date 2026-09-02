@@ -28,10 +28,11 @@ jobs:
       - name: Install dependency
         run: python -m pip install --disable-pip-version-check requests
 
-      - name: Run read-only endpoint and frontend probes
+      - name: Run low-rate read-only probes
         run: |
           python revvity_api_audit/probe.py
           python revvity_api_audit/search_probe.py
+          python revvity_api_audit/discover_public_codes.py
 
       - name: Upload audit results
         uses: actions/upload-artifact@v4
