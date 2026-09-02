@@ -6,7 +6,7 @@ import json
 import re
 import time
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -19,7 +19,7 @@ KNOWN_CODE = "P8EYZE"
 KNOWN_NUMERIC_ID = "1111"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; Revvity-eIFU-audit/1.0; research; low-rate)",
+    "User-Agent": "Mozilla/5.0 (compatible; Revvity-eIFU-audit/1.1; research; low-rate)",
     "Accept": "application/json,text/plain,text/html,application/javascript,*/*",
     "Referer": f"https://docs.revvity.com/qr/{KNOWN_CODE}",
 }
@@ -28,10 +28,14 @@ session = requests.Session()
 session.headers.update(HEADERS)
 
 
-def fetch(url: str, method: str = "GET", timeout: int = 30) -> dict:
+def request_raw(url: str, method: str = "GET", timeout: int = 30):
+    return session.request(method, url, timeout=timeout, allow_redirects=True)
+
+
+def fetch(url: str, method: str = "GET", timeout: int = 30, text_limit: int = 500_000) -> dict:
     rec: dict = {"url": url, "method": method}
     try:
-        r = session.request(method, url, timeout=timeout, allow_redirects=True)
+        r = request_raw(url, method=method, timeout=timeout)
         body = r.content
         rec.update(
             status=r.status_code,
@@ -41,7 +45,7 @@ def fetch(url: str, method: str = "GET", timeout: int = 30) -> dict:
             content_type=r.headers.get("content-type"),
             bytes=len(body),
             sha256=hashlib.sha256(body).hexdigest(),
-            text=body[:500000].decode(r.encoding or "utf-8", errors="replace"),
+            text=body[:text_limit].decode(r.encoding or "utf-8", errors="replace"),
         )
     except Exception as exc:
         rec["error"] = f"{type(exc).__name__}: {exc}"
@@ -50,40 +54,82 @@ def fetch(url: str, method: str = "GET", timeout: int = 30) -> dict:
 
 records: list[dict] = []
 
-# 1. Fetch public SPA and its static assets, then extract API route strings.
+# 1. Fetch the public SPA and every JS/CSS asset in full.
 docs = fetch(DOCS)
 records.append(docs)
+(OUT / "docs_index.html").write_text(docs.get("text", ""), encoding="utf-8")
+
 asset_urls: list[str] = []
 if docs.get("status") == 200:
-    html = docs.get("text", "")
-    for value in re.findall(r'''(?:src|href)=["']([^"']+)["']''', html, flags=re.I):
+    for value in re.findall(r'''(?:src|href)=["']([^"']+)["']''', docs.get("text", ""), flags=re.I):
         absolute = urljoin(DOCS, value)
         if any(absolute.lower().split("?", 1)[0].endswith(ext) for ext in (".js", ".css")):
             asset_urls.append(absolute)
 
-asset_records: list[dict] = []
-route_strings: set[str] = set()
+asset_metadata: list[dict] = []
 absolute_urls: set[str] = set()
-for asset_url in sorted(set(asset_urls)):
-    rec = fetch(asset_url)
-    asset_records.append(rec)
-    text = rec.get("text", "")
-    for value in re.findall(r'''https?://[^"'`\\\s]+''', text):
-        absolute_urls.add(value.rstrip(")]};,"))
-    for value in re.findall(r'''["'`](/api/[A-Za-z0-9_./?=&{}:-]+)["'`]''', text):
-        route_strings.add(value)
-    # Broader fragments around eifu/kit, useful when minification concatenates strings.
-    for match in re.finditer(r"eifu|/api/|reserveEifuCode|batchId|combinationLot", text, flags=re.I):
-        lo = max(0, match.start() - 250)
-        hi = min(len(text), match.end() + 450)
-        route_strings.add("CONTEXT: " + text[lo:hi])
+quoted_candidates: set[str] = set()
+contexts: list[dict] = []
+discovered_api_paths: set[str] = set()
 
-(OUT / "spa_assets.json").write_text(
-    json.dumps({"assets": asset_records, "api_route_strings": sorted(route_strings), "absolute_urls": sorted(absolute_urls)}, ensure_ascii=False, indent=2),
-    encoding="utf-8",
-)
+for index, asset_url in enumerate(sorted(set(asset_urls)), start=1):
+    try:
+        r = request_raw(asset_url)
+        body = r.content
+        suffix = Path(urlparse(asset_url).path).suffix or ".bin"
+        asset_path = OUT / f"asset_{index:02d}{suffix}"
+        asset_path.write_bytes(body)
+        text = body.decode(r.encoding or "utf-8", errors="replace")
+        asset_metadata.append({
+            "url": asset_url,
+            "status": r.status_code,
+            "content_type": r.headers.get("content-type"),
+            "bytes": len(body),
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "saved_as": asset_path.name,
+        })
 
-# 2. Probe only a small set of conventional read-only routes. No code-space brute force.
+        for value in re.findall(r'''https?://[^"'`\\\s]+''', text):
+            absolute_urls.add(value.rstrip(")]};,"))
+        for value in re.findall(r'''["'`]([^"'`]{1,500})["'`]''', text):
+            if any(token in value.lower() for token in ("/api/", "eifu", "kit/id", "batchid", "combinationlot", "reserve")):
+                quoted_candidates.add(value)
+        for value in re.findall(r'''/api/[A-Za-z0-9_./?=&{}:$+-]+''', text):
+            discovered_api_paths.add(value.rstrip(".,);]}"))
+
+        for pattern in (r"eifu2-prod-api", r"/api/eifu", r"kit/id", r"reserveEifuCode", r"batchId", r"combinationLot", r"reserve"):
+            for match in re.finditer(pattern, text, flags=re.I):
+                lo = max(0, match.start() - 500)
+                hi = min(len(text), match.end() + 1000)
+                contexts.append({"asset": asset_url, "pattern": pattern, "offset": match.start(), "text": text[lo:hi]})
+
+        # Fetch source map when explicitly referenced by the bundle.
+        map_match = re.search(r"//# sourceMappingURL=([^\s]+)", text[-1000:])
+        if map_match:
+            map_url = urljoin(asset_url, map_match.group(1))
+            mr = request_raw(map_url)
+            map_path = OUT / f"asset_{index:02d}{suffix}.map"
+            map_path.write_bytes(mr.content)
+            asset_metadata.append({
+                "url": map_url,
+                "status": mr.status_code,
+                "content_type": mr.headers.get("content-type"),
+                "bytes": len(mr.content),
+                "sha256": hashlib.sha256(mr.content).hexdigest(),
+                "saved_as": map_path.name,
+            })
+    except Exception as exc:
+        asset_metadata.append({"url": asset_url, "error": f"{type(exc).__name__}: {exc}"})
+
+(OUT / "spa_analysis.json").write_text(json.dumps({
+    "assets": asset_metadata,
+    "absolute_urls": sorted(absolute_urls),
+    "quoted_candidates": sorted(quoted_candidates),
+    "discovered_api_paths": sorted(discovered_api_paths),
+    "contexts": contexts,
+}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+# 2. Probe a small, conventional, read-only route set. No token-space scan.
 paths = [
     "/",
     "/api/eifu/kit/id/",
@@ -109,18 +155,26 @@ paths = [
     "/api-docs/",
     "/.well-known/openapi.json",
 ]
+# Add only clearly extracted API paths from the public bundle.
+for path in sorted(discovered_api_paths):
+    if path.startswith("/api/") and "{" not in path and "$" not in path and len(path) < 300:
+        paths.append(path)
+
+seen: set[str] = set()
 for path in paths:
-    records.append(fetch(API + path))
+    url = path if path.startswith("http") else API + path
+    if url in seen:
+        continue
+    seen.add(url)
+    records.append(fetch(url))
     time.sleep(0.25)
 
-# OPTIONS may reveal allowed methods/CORS without modifying anything.
 for path in ["/api/eifu/kit", "/api/eifu/kit/id/", f"/api/eifu/kit/id/{KNOWN_CODE}"]:
     records.append(fetch(API + path, method="OPTIONS"))
     time.sleep(0.25)
 
 (OUT / "probe_results.json").write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
 
-# Compact human-readable summary.
 lines = ["method\tstatus\tbytes\tcontent-type\turl\tfinal-url/error"]
 for rec in records:
     lines.append("\t".join([
